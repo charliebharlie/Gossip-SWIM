@@ -5,9 +5,8 @@ import (
 )
 
 type NodeID struct {
-	IP      string
-	Port    int
-	Version int
+	IP   string
+	Port int
 }
 
 type NodeState string
@@ -20,6 +19,7 @@ const (
 
 type Member struct {
 	ID          NodeID
+	Version     int
 	State       NodeState
 	Heartbeat   int
 	LastUpdate  time.Time // used locally for T_fail and T_suspicion
@@ -28,8 +28,6 @@ type Member struct {
 
 type Message struct {
 	Type             string // "gossip", "join", "join_ack", "leave"
-	SenderID         NodeID
-	SenderState      NodeState
-	SenderHeartbeat  int
+	Sender           Member
 	MembershipUpdate []Member // changes (suspect/dead/joins/leaves)
 }
