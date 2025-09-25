@@ -1,6 +1,5 @@
 package main
 
-// TODO: Fix heartbeat counter and how nodes that left are joined back
 import (
 	"encoding/json"
 	"flag"
@@ -11,16 +10,25 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
 
 var membershipList map[NodeID]Member
+var mu sync.RWMutex
+var suspicionTimers map[NodeID]chan struct{}
 
-// Hyperparamter
+// Hyperparamters
+var delta int = 1
 var DEFAULT_DISSEMINATE int = 5
+var T_Fail = time.Duration(1*delta) * time.Second
+var T_Suspicion = time.Duration(2*delta) * time.Second
 
 func main() {
+	// print(time.Duration(T_Fail)/time.Second, " ", time.Duration(T_Suspicion)/time.Second)
+	// os.Exit(0)
+
 	// Command Line Arguments
 	ip := flag.String("ip", "127.0.0.1", "VM hostname")
 	port := flag.Int("port", 5001, "Port to bind")
@@ -29,6 +37,8 @@ func main() {
 	flag.Parse()
 
 	membershipList = make(map[NodeID]Member)
+	suspicionTimers = make(map[NodeID]chan struct{})
+
 	version, err := getVersion()
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
@@ -61,8 +71,9 @@ func main() {
 
 		// send a join request to the introducer
 		msg := Message{
-			Type:   "join",
-			Sender: membershipList[currNodeID],
+			Type:             "join",
+			Sender:           membershipList[currNodeID],
+			MembershipUpdate: []Member{},
 		}
 
 		data, err := json.Marshal(msg)
@@ -87,9 +98,9 @@ func main() {
 	go gossipLoop(currNodeID, conn)
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigChan, syscall.SIGINT)
 
-	// runs in the background, listening for interrupt or terminated signals, once it receives a signal, call leaveGroup()
+	// runs in the background, listening for interrupt signals, once it receives a signal, voluntarily leave the group
 	<-sigChan
 	leaveGroup(currNodeID, conn)
 }
@@ -98,10 +109,10 @@ func main() {
 func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 	buf := make([]byte, 4096)
 	for {
-		fmt.Println("------------------------------------------------------")
+		fmt.Println("------------------------------------------------------------------------------")
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			fmt.Printf("recv error at address: %v: %v\n", addr, err)
+			fmt.Printf("recv error: %v at address: %v\n", err, addr)
 			continue
 		}
 
@@ -112,15 +123,19 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			continue
 		}
 
+		fmt.Println(msg)
 		fmt.Println("----------- BEFORE -----------")
-		fmt.Printf("Received %s from Member: %v\nHeartbeat:%d\nState: %s\n", msg.Type, msg.Sender, msg.Sender.Heartbeat, msg.Sender.State)
+		fmt.Println("Current Table: ")
+		for _, member := range membershipList {
+			fmt.Println(member)
+		}
 
-		fmt.Printf("Current Table: %v\n", membershipList)
 		// Join and Leave handling
 		// Join: Only introducer and new node should use these messages
-		// Leave: Leaving node sends it to a random node in the group
+		// Leave: Leaving node sends it to any random node in the group
 		switch msg.Type {
 		case "join":
+			mu.Lock()
 
 			// Add the new node to introducerNode's table
 			membershipList[msg.Sender.ID] = Member{
@@ -137,19 +152,19 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			for _, member := range membershipList {
 				fullTable = append(fullTable, member)
 			}
-			fmt.Printf("FULLTABLE: %v", fullTable)
 
-			// Send an ack to the new node, note that we don't set introducerNode as the sender, introducerNode is already in fullTable <- scratch this
 			ack := Message{
 				Type:             "join_ack",
-				Sender:           membershipList[currNodeID], // for debugging purposes
+				Sender:           membershipList[currNodeID],
 				MembershipUpdate: fullTable,
 			}
+
 			data, _ := json.Marshal(ack)
 			err := sendUDPto(msg.Sender.ID, data, conn)
 			if err != nil {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 			}
+			mu.Unlock()
 
 		case "join_ack":
 			// Add the fullTable to the newNode's table
@@ -158,12 +173,14 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			}
 
 		case "leave":
+			mu.Lock()
 			fmt.Printf("Node %v leaving\n", msg.Sender.ID)
-			m := membershipList[msg.Sender.ID]
-			m.State = Dead
-			m.LastUpdate = time.Now()
-			m.Disseminate = DEFAULT_DISSEMINATE
-			membershipList[msg.Sender.ID] = m
+			currNode := membershipList[msg.Sender.ID]
+			currNode.State = Dead
+			currNode.LastUpdate = time.Now()
+			currNode.Disseminate = DEFAULT_DISSEMINATE
+			membershipList[msg.Sender.ID] = currNode
+			mu.Unlock()
 
 		case "gossip":
 			// Refresh the sender node's entry in currNode's Membership List as we got a message from them
@@ -174,33 +191,41 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 				updateMembershipList(member)
 			}
 
+			refreshSuspicionTimer(msg.Sender.ID)
 		}
 
-		fmt.Println("----------- After -----------")
-		fmt.Printf("Received %s from Member: %v\nHeartbeat:%d\nState: %s\n", msg.Type, msg.Sender, msg.Sender.Heartbeat, msg.Sender.State)
+		fmt.Println("----------- AFTER -----------")
+		// fmt.Println(msg.Sender)
 
-		fmt.Printf("Current Table: %v\n", membershipList)
+		fmt.Println("Current Table: ")
+		for _, member := range membershipList {
+			fmt.Println(member)
+		}
+
 	}
 }
 
 func updateMembershipList(newNode Member) {
-	oldNode, ok := membershipList[newNode.ID]
+	mu.Lock()
+	defer mu.Unlock()
+	oldNode, exists := membershipList[newNode.ID]
 
 	// update the entry in membershipList if it doesn't exist or the version is lower
-	if !ok || newNode.Version > oldNode.Version {
+	if !exists || newNode.Version > oldNode.Version {
+		newNode.LastUpdate = time.Now()
 		membershipList[newNode.ID] = newNode
 		fmt.Printf("Updated %v to %v\nState: %s\nVersion: %d \n", oldNode.ID, newNode.ID, newNode.State, newNode.Version)
 		return
 	}
 
-	// if the versions are the same, we compare the heartbeats or states and take according to (alive < suspect < dead). TODO: If the newNode entry's State is Dead, we accept it no matter what. <--- Check this
+	// if the versions are the same, we compare the heartbeats or states and take according to (alive < suspect < dead). TODO: If the newNode entry's State is Dead, we accept it no matter what. <--- Check this (not sure why, the system works much better for NOT taking Dead state nodes no matter what [ie. we consider a larger Heartbeat value instead])
 	if newNode.Version == oldNode.Version {
-		if (newNode.Heartbeat > oldNode.Heartbeat) || (newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State) || (newNode.State == Dead)) {
+		if (newNode.Heartbeat > oldNode.Heartbeat) || (newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State)) {
 			if newNode.Heartbeat > oldNode.Heartbeat {
-				fmt.Printf("Merged %v into %v, because of larger heartbeat %d > %d\n", newNode.ID, oldNode.ID, newNode.Heartbeat, oldNode.Heartbeat)
+				fmt.Printf("Heartbeat Merged %v into %v\n", newNode, oldNode)
 			}
 			if newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State) {
-				fmt.Printf("Merged %v into %v, because of higher state %s > %s\n", newNode.ID, oldNode.ID, newNode.State, oldNode.State)
+				fmt.Printf("State Merged %v into %v\n", newNode, oldNode)
 			}
 
 			if rank(newNode.State) != rank(oldNode.State) {
@@ -226,8 +251,56 @@ func rank(state NodeState) int {
 	case (Dead):
 		return 3
 	default:
-		return 0
+		return -1
 	}
+}
+
+func refreshSuspicionTimer(currNodeID NodeID) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	// If the stop channel already exists, that means we should reset the timer (the timer being either the timer before suspicion or the timer after suspicion) as we heard from the suspected node
+	stopChannel, exists := suspicionTimers[currNodeID]
+	if exists {
+		close(stopChannel)
+		delete(suspicionTimers, currNodeID)
+	}
+
+	// We want to interrupt the timers if the channel is closed (ie. we received a heartbeat from the suspected node)
+	stop := make(chan struct{})
+	suspicionTimers[currNodeID] = stop
+
+	go func(currNodeID NodeID, stop <-chan struct{}) {
+		if membershipList[currNodeID].State == Alive {
+			select {
+			case <-time.After(T_Fail):
+				mu.Lock()
+				currNode := membershipList[currNodeID]
+				currNode.State = Suspect
+				currNode.Disseminate = DEFAULT_DISSEMINATE
+				membershipList[currNodeID] = currNode
+				fmt.Printf("Node %v is suspected\n", currNodeID)
+				mu.Unlock()
+			case <-stop:
+				return
+			}
+		}
+
+		if membershipList[currNodeID].State == Suspect {
+			select {
+			case <-time.After(T_Suspicion):
+				mu.Lock()
+				currNode := membershipList[currNodeID]
+				currNode.State = Dead
+				currNode.Disseminate = DEFAULT_DISSEMINATE
+				membershipList[currNodeID] = currNode
+				fmt.Printf("Node %v is dead\n", currNodeID)
+				mu.Unlock()
+			case <-stop:
+				return
+			}
+		}
+	}(currNodeID, stop)
 }
 
 func sendUDPto(receiverNode NodeID, data []byte, conn *net.UDPConn) error {
@@ -236,30 +309,29 @@ func sendUDPto(receiverNode NodeID, data []byte, conn *net.UDPConn) error {
 	if err != nil {
 		return fmt.Errorf("send error: %e", err)
 	} else {
-		fmt.Printf("Sent gossip to %v:%d\n", receiverNode.IP, receiverNode.Port)
+		fmt.Printf("Sent gossip to %v\n", receiverNode)
 		return nil
 	}
 }
 
 func gossipLoop(currNodeID NodeID, conn *net.UDPConn) {
-	ticker := time.NewTicker(1 * time.Second)
+	// Tuning how often the nodes should gossip
+	ticker := time.NewTicker(time.Duration(1000*delta) * time.Millisecond)
 	for range ticker.C {
+		mu.Lock()
 		currNode := membershipList[currNodeID]
 		currNode.Heartbeat++
 		membershipList[currNodeID] = currNode
+		mu.Unlock()
 
 		peer, err := getRandomNode(currNodeID)
 		if err != nil {
 			fmt.Printf("error: %v", err)
 			continue
 		}
+
 		// piggyback any changes with the normal heartbeat
 		piggyBackNodes := getPiggyBackNodes()
-		if len(piggyBackNodes) != 0 {
-			fmt.Printf("Changed or new nodes: %v", piggyBackNodes)
-			// TODO: Finish this up next
-			// os.Exit(1)
-		}
 
 		msg := Message{
 			Type:             "gossip",
@@ -276,8 +348,10 @@ func gossipLoop(currNodeID NodeID, conn *net.UDPConn) {
 
 // Gossip any nodes whose State has changed or any new nodes (will have a positive Disseminate counter)
 func getPiggyBackNodes() []Member {
-	changedNodes := []Member{}
+	mu.Lock()
+	defer mu.Unlock()
 
+	changedNodes := []Member{}
 	for id, member := range membershipList {
 		if member.Disseminate > 0 {
 			member.Disseminate--
@@ -289,21 +363,30 @@ func getPiggyBackNodes() []Member {
 }
 
 func getRandomNode(currNodeID NodeID) (NodeID, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+
 	candidates := []NodeID{}
-	for id, m := range membershipList {
-		if id == currNodeID || m.State == Dead {
+	for id, member := range membershipList {
+		if id == currNodeID || member.State == Dead {
 			continue
 		}
+
 		candidates = append(candidates, id)
 	}
 
 	if len(candidates) == 0 {
-		return NodeID{}, fmt.Errorf("Could not find a random peer\n")
+		return NodeID{}, fmt.Errorf("Could not find a random node\n")
 	}
+
 	return candidates[rand.Intn(len(candidates))], nil
 }
 
+// voluntarily leaves the group
 func leaveGroup(currNode NodeID, conn *net.UDPConn) {
+	mu.RLock()
+	defer mu.RUnlock()
+
 	leaveMsg := Message{
 		Type:   "leave",
 		Sender: membershipList[currNode],
