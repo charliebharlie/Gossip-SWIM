@@ -31,6 +31,19 @@ type Member struct {
 	Disseminate int       // counter for piggybacking, if a member has a positive value means we should send this member as an update
 }
 
+type Ping_State string
+const (
+	FirstPing Ping_State = "First Ping"
+	SecondPing Ping_State = "Second Ping"
+)
+
+type Pending struct {
+	ID			NodeID
+	Version		int
+	PingState	Ping_State
+	SentTime	time.Time
+}
+
 func (m Member) String() string {
 	return fmt.Sprintf("[%v, State=%s, Heartbeat=%d Disseminate=%d]",
 		m.ID, m.State, m.Heartbeat, m.Disseminate)
@@ -40,9 +53,12 @@ type Message struct {
 	Type             string // "gossip", "join", "join_ack", "leave"
 	Sender           Member
 	MembershipUpdate []Member // changes (suspect/dead/joins/leaves)
+	TargetID        NodeID // for indirect pings
+
 }
 
 func (m Message) String() string {
 	return fmt.Sprintf("Received %v from %v with %v updates",
 		m.Type, m.Sender, m.MembershipUpdate)
 }
+
