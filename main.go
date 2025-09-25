@@ -16,12 +16,16 @@ import (
 )
 
 var membershipList map[NodeID]Member
+var pendingList map[NodeID]Pending
+var indirectPingTracking map[NodeID]NodeID
 var mu sync.RWMutex
 var suspicionTimers map[NodeID]chan struct{}
 
 // Hyperparamters
 var delta int = 1
 var DEFAULT_DISSEMINATE int = 5
+var NUM_RANDOM_INDIRECT_PINGS int = 5
+var TIMEOUT int = 10
 var T_Fail = time.Duration(1*delta) * time.Second
 var T_Suspicion = time.Duration(2*delta) * time.Second
 
@@ -193,6 +197,43 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 
 			refreshSuspicionTimer(msg.Sender.ID)
 		}
+		case "swim_ping":
+			// this node was pinged and need to respond
+			ack := Message{Type: "ack", Sender: membershipList[currNodeID]}
+			data, _ := json.Marshal(ack)
+			err := sendUDPto(msg.Sender.ID, data, conn)
+			if err != nil {
+				fmt.Printf("Failed to send UDP packet: %v", err)
+			}
+		case "swim_ack":
+			// this node pinged a node and this is the respones
+			// remove from pending list
+			sender := msg.Sender.ID
+			pending, ok := pendingList[sender]
+			if ok {
+				delete(pendingList, sender)
+			}
+			updateMembershipList(msg.Sender)
+		case "swim_indirect_ping":
+			// ping node based on directions of another node
+			targetNodeID := msg.targetNodeID // add
+			ping := Message{Type: "ping", Sender: membershipList[currNodeID]}
+			indirectPingTracking[targetNodeID] = msg.Sender.ID
+			data, _ := json.Marshal(ping)
+			err := sendUDPto(targetNodeID, data, conn)
+			if err != nil {
+				fmt.Printf("Failed to send UDP packet: %v", err)
+			}
+		case "swim_indirect_ack":
+			// send ack to node that wanted this node to ping another node
+			ack := Message{Type: "ack", Sender: msg.Sender}
+			data, _ := json.Marshal(ack)
+			// send back to whoever wanted this to be sent
+			err := sendUDPto(indirectPingTracking[msg.Sender.ID], data, conn)
+			if err != nil {
+				fmt.Printf("Failed to send UDP packet: %v", err)
+			}
+			delete(indirectPingTracking, msg.Sender.ID)
 
 		fmt.Println("----------- AFTER -----------")
 		// fmt.Println(msg.Sender)
@@ -345,6 +386,77 @@ func gossipLoop(currNodeID NodeID, conn *net.UDPConn) {
 		}
 	}
 }
+func pingAckLoop(currNodeID NodeID, conn *net.UDPConn) {
+	// here just send and add to a waiting list with a specified timeout, before sending new ping in this loop check waiting list to see if any have been marked recieved 
+	// by recv_loop. If yes, chilling. If no and more than timeout away from og time, ping random neighbors, update awaiting entry? if no receipt within
+	// another timeout length time, then mark as dead?
+	ticker := time.NewTicker(1 * time.Second)
+	for range ticker.C {
+		// keep track of membership list in case switched back to gossip
+		currNode := membershipList[currNodeID]
+		currNode.Heartbeat++
+		membershipList[currNodeID] = currNode
+		
+		for id, pending := range pendingList {
+			if pendingList[id].SentTime < (time.Now() - TIMEOUT) && pendingList[id].Ping_State == FirstPing {
+				// send indirect pings
+				for i := 0; i < NUM_RANDOM_INDIRECT_PINGS; i++ {
+					peer, err := getRandomNode(currNodeID)
+					if err != nil {
+						fmt.Printf("error: %v", err)
+						continue
+					}
+					msg := Message{
+						Type:             "swim_indirect_ping",
+						Sender:           membershipList[currNodeID],
+						MembershipUpdate: piggyBackNodes,
+						TargetID:         id
+					}
+					// update pending entry to be (target peer, new time(?), second ping)
+					pending := pendingList[id]
+					pending.PingState = SecondPing
+					pnding.SentTime = time.Now()
+					pendingList[id] = pending
+					data, _ := json.Marshal(msg)
+					err = sendUDPto(peer, data, conn)
+					if err != nil {
+						fmt.Printf("Failed to send UDP packet: %v", err)
+					}
+				}
+
+			}else if pendingList[id].SentTime < (time.Now() - TIMEOUT) && pendingList[id].Ping_State == SecondPing{
+				// mark as suspected
+			}
+		}
+		// piggyback any changes with the normal heartbeat
+		piggyBackNodes := getPiggyBackNodes()
+		if len(piggyBackNodes) != 0 {
+			fmt.Printf("Changed or new nodes: %v", piggyBackNodes)
+			// TODO: Finish this up next
+			// os.Exit(1)
+		}
+		
+		peer, err := getRandomNode(currNodeID)
+		if err != nil {
+			fmt.Printf("error: %v", err)
+			continue
+		}
+
+		msg := Message{
+			Type:             "swim_ping",
+			Sender:           membershipList[currNodeID],
+			MembershipUpdate: piggyBackNodes,
+			TargetID: 		  peer
+		}
+		// add (peer, time, state) to list where state can be first_ping, second_ping?
+		pendingList[peer] = Pending{TargetID: peer, Version: peer.version, PingState: FirstPing, SentTime: time.now()}
+		data, _ := json.Marshal(msg)
+		err = sendUDPto(peer, data, conn)
+		if err != nil {
+			fmt.Printf("Failed to send UDP packet: %v", err)
+		}
+	}
+}
 
 // Gossip any nodes whose State has changed or any new nodes (will have a positive Disseminate counter)
 func getPiggyBackNodes() []Member {
@@ -461,3 +573,5 @@ func getMachineNumber(hostname string) (int, error) {
 
 	return num - 900, nil
 }
+
+
