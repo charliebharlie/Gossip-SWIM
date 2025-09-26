@@ -20,6 +20,7 @@ var pendingList map[NodeID]Pending
 var indirectPingTracking map[NodeID]NodeID
 var mu sync.RWMutex
 var suspicionTimers map[NodeID]chan struct{}
+var gossipAliveTimers map[NodeID]chan struct{}
 
 // Hyperparamters
 var delta int = 1
@@ -30,7 +31,7 @@ var T_Gossip_Suspicion = time.Duration(1*delta) * time.Second
 var T_Gossip_Fail = time.Duration(2*delta) * time.Second
 
 var T_SWIM_Direct = time.Duration(500*delta) * time.Millisecond
-var T_SWIM_Indirect = time.Duration(1*delta) * time.Second
+var T_SWIM_Indirect = time.Duration(1000*delta) * time.Millisecond
 var T_SWIM_Suspicion = T_SWIM_Direct + T_SWIM_Indirect
 var T_SWIM_Fail = time.Duration(1*delta)*time.Second + time.Duration(500*delta)*time.Millisecond
 
@@ -49,6 +50,7 @@ func main() {
 	pendingList = make(map[NodeID]Pending)
 	indirectPingTracking = make(map[NodeID]NodeID)
 	suspicionTimers = make(map[NodeID]chan struct{})
+	gossipAliveTimers = make(map[NodeID]chan struct{})
 
 	version, err := getVersion()
 	if err != nil {
@@ -106,7 +108,7 @@ func main() {
 	go recvLoop(conn, currNodeID)
 
 	// Start gossip loop in the background
-	go swimLoop(currNodeID, conn)
+	go gossipLoop(currNodeID, conn)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT)
@@ -202,7 +204,7 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 				updateMembershipList(member)
 			}
 
-			refreshSuspicionTimer(msg.Sender.ID, "Gossip")
+			refreshGossipSuspicion(msg.Sender.ID)
 
 		case "swim_ping":
 			// this node was pinged and need to respond
@@ -299,7 +301,8 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			// 	fmt.Printf("Failed to send UDP packet: %v", err)
 			// }
 
-			delete(pendingList, msg.Sender.ID)
+			senderID := msg.Sender.ID
+			delete(pendingList, senderID)
 			updateMembershipList(msg.Sender)
 
 			for _, member := range msg.MembershipUpdate {
@@ -327,6 +330,10 @@ func updateMembershipList(newNode Member) {
 	if !exists || newNode.Version > oldNode.Version {
 		newNode.LastUpdate = time.Now()
 		membershipList[newNode.ID] = newNode
+
+		// bug here... if we don't delete the Dead node from the pendingList after it comes back, the PingState remains the same, so it'll always be suspect...
+		delete(pendingList, newNode.ID)
+
 		fmt.Printf("Updated %v to %v\nState: %s\nVersion: %d \n", oldNode.ID, newNode.ID, newNode.State, newNode.Version)
 		return
 	}
@@ -368,20 +375,51 @@ func rank(state NodeState) int {
 	}
 }
 
-func refreshSuspicionTimer(currNodeID NodeID, mode string) {
+func refreshGossipSuspicion(currNodeID NodeID) {
 	mu.Lock()
 	defer mu.Unlock()
 
 	// If the stop channel already exists, that means we should reset the timer (the timer being either the timer before suspicion or the timer after suspicion) as we heard from the suspected node
+	stopChannel, exists := gossipAliveTimers[currNodeID]
+	if exists {
+		close(stopChannel)
+		delete(gossipAliveTimers, currNodeID)
+	}
+
+	// We want to interrupt the timers if the channel is closed (ie. we received a heartbeat from the suspected node)
+	stop := make(chan struct{})
+	gossipAliveTimers[currNodeID] = stop
+
+	go func(currNodeID NodeID, stop <-chan struct{}) {
+		select {
+		case <-time.After(T_Gossip_Suspicion):
+			mu.Lock()
+			currNode := membershipList[currNodeID]
+			if currNode.State == Alive {
+				currNode.State = Suspect
+				currNode.Disseminate = DEFAULT_DISSEMINATE
+				membershipList[currNodeID] = currNode
+
+				fmt.Printf("Node %v is suspected\n", currNodeID)
+				go startFailTimer(currNodeID, T_Gossip_Fail)
+			}
+			mu.Unlock()
+		case <-stop:
+			return
+		}
+	}(currNodeID, stop)
+}
+
+// Both Gossip and SWIM have the same suspicion -> Dead logic
+func startFailTimer(currNodeID NodeID, failTimeout time.Duration) {
+	mu.Lock()
+	defer mu.Unlock()
 	stopChannel, exists := suspicionTimers[currNodeID]
+
+	// If the stop channel already exists, that means we should reset the timer (the timer being either the timer before suspicion or the timer after suspicion) as we heard from the suspected node
 	if exists {
 		close(stopChannel)
 		delete(suspicionTimers, currNodeID)
-	}
-
-	failTimer := T_Gossip_Fail
-	if mode == "SWIM" {
-		failTimer = T_SWIM_Fail
 	}
 
 	// We want to interrupt the timers if the channel is closed (ie. we received a heartbeat from the suspected node)
@@ -389,36 +427,20 @@ func refreshSuspicionTimer(currNodeID NodeID, mode string) {
 	suspicionTimers[currNodeID] = stop
 
 	go func(currNodeID NodeID, stop <-chan struct{}) {
-		if mode == "Gossip" {
-			if membershipList[currNodeID].State == Alive {
-				select {
-				case <-time.After(T_Gossip_Suspicion):
-					mu.Lock()
-					currNode := membershipList[currNodeID]
-					currNode.State = Suspect
-					currNode.Disseminate = DEFAULT_DISSEMINATE
-					membershipList[currNodeID] = currNode
-					fmt.Printf("Node %v is suspected\n", currNodeID)
-					mu.Unlock()
-				case <-stop:
-					return
-				}
-			}
-		}
-
-		if membershipList[currNodeID].State == Suspect {
-			select {
-			case <-time.After(failTimer):
-				mu.Lock()
-				currNode := membershipList[currNodeID]
+		select {
+		case <-time.After(failTimeout):
+			mu.Lock()
+			currNode := membershipList[currNodeID]
+			if currNode.State == Suspect {
 				currNode.State = Dead
 				currNode.Disseminate = DEFAULT_DISSEMINATE
 				membershipList[currNodeID] = currNode
-				fmt.Printf("Node %v is dead\n", currNodeID)
-				mu.Unlock()
-			case <-stop:
-				return
+
+				fmt.Printf("Node %v is Dead\n", currNodeID)
 			}
+			mu.Unlock()
+		case <-stop:
+			return
 		}
 	}(currNodeID, stop)
 }
@@ -465,6 +487,7 @@ func gossipLoop(currNodeID NodeID, conn *net.UDPConn) {
 		}
 	}
 }
+
 func swimLoop(currNodeID NodeID, conn *net.UDPConn) {
 	// here just send and add to a waiting list with a specified timeout, before sending new ping in this loop check waiting list to see if any have been marked recieved
 	// by recv_loop. If yes, chilling. If no and more than timeout away from og time, ping random neighbors, update awaiting entry? if no receipt within
@@ -503,10 +526,11 @@ func swimLoop(currNodeID NodeID, conn *net.UDPConn) {
 						TargetID:         targetID,
 					}
 					mu.RUnlock()
+
 					// update pending entry to be (target peer, new time(?), second ping)
 					pending := pendingList[targetID]
 					pending.PingState = SecondPing
-					// pending.SentTime = time.Now()
+					pending.SentTime = time.Now()
 					pendingList[targetID] = pending
 					fmt.Printf("Sending indirect ping to target: %v\n", targetID)
 
@@ -519,18 +543,17 @@ func swimLoop(currNodeID NodeID, conn *net.UDPConn) {
 
 			} else if time.Now().Sub(pendingList[targetID].SentTime) > T_SWIM_Indirect && pendingList[targetID].PingState == SecondPing {
 				// if the T_SWIM_Fail times out, the node is dead
-				refreshSuspicionTimer(targetID, "SWIM")
-
 				mu.Lock()
 				targetNode, ok := membershipList[targetID]
 				if ok {
 					// mark as suspected
-					newState := updateState(targetNode.State, Suspect)
-					if newState != targetNode.State {
-						targetNode.State = newState
+					if targetNode.State == Alive {
+						targetNode.State = Suspect
 						targetNode.Disseminate = DEFAULT_DISSEMINATE
 						membershipList[targetID] = targetNode
 						fmt.Printf("Node %v is suspected\n", targetID)
+						go startFailTimer(targetID, T_SWIM_Fail)
+						// delete(pendingList, targetID)
 					}
 				}
 				mu.Unlock()
@@ -540,7 +563,7 @@ func swimLoop(currNodeID NodeID, conn *net.UDPConn) {
 		}
 
 		piggyBackNodes = getPiggyBackNodes()
-		peerID, err := getRandomNode(currNodeID)
+		targetID, err := getRandomNode(currNodeID)
 		if err != nil {
 			fmt.Printf("error: %v", err)
 			continue
@@ -551,32 +574,23 @@ func swimLoop(currNodeID NodeID, conn *net.UDPConn) {
 			Type:             "swim_ping",
 			Sender:           membershipList[currNodeID],
 			MembershipUpdate: piggyBackNodes,
-			TargetID:         peerID,
+			TargetID:         targetID,
 		}
 		mu.RUnlock()
+
 		// add (peer, time, state) to list where state can be first_ping, second_ping?
-		pendingList[peerID] = Pending{
-			ID:        peerID,
+		pendingList[targetID] = Pending{
+			ID:        targetID,
 			PingState: FirstPing,
 			SentTime:  time.Now(),
 		}
 
-		if len(pendingList) == 0 {
-			os.Exit(0)
-		}
 		data, _ := json.Marshal(msg)
-		err = sendUDPto(peerID, data, conn)
+		err = sendUDPto(targetID, data, conn)
 		if err != nil {
 			fmt.Printf("Failed to send UDP packet: %v", err)
 		}
 	}
-}
-
-func updateState(oldState NodeState, newState NodeState) NodeState {
-	if rank(oldState) < rank(newState) {
-		return newState
-	}
-	return oldState
 }
 
 // Gossip any nodes whose State has changed or any new nodes (will have a positive Disseminate counter)
@@ -601,7 +615,8 @@ func getRandomNode(currNodeID NodeID) (NodeID, error) {
 
 	candidates := []NodeID{}
 	for id, member := range membershipList {
-		if id == currNodeID || member.State == Dead {
+		_, exists := pendingList[id]
+		if id == currNodeID || exists || member.State == Dead {
 			continue
 		}
 
