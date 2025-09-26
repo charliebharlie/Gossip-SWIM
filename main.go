@@ -29,10 +29,13 @@ var TIMEOUT int = 10
 var T_Gossip_Suspicion = time.Duration(1*delta) * time.Second
 var T_Gossip_Fail = time.Duration(2*delta) * time.Second
 
+var drop_rate = 0
+
 var T_SWIM_Direct = time.Duration(500*delta) * time.Millisecond
 var T_SWIM_Indirect = time.Duration(1*delta) * time.Second
 var T_SWIM_Suspicion = T_SWIM_Direct + T_SWIM_Indirect
 var T_SWIM_Fail = time.Duration(1*delta)*time.Second + time.Duration(500*delta)*time.Millisecond
+
 
 func main() {
 	// fmt.Println(float64(T_SWIM_Fail)/float64(time.Second), float64(T_SWIM_Suspicion)/float64(time.Second))
@@ -42,6 +45,8 @@ func main() {
 	ip := flag.String("ip", "127.0.0.1", "VM hostname")
 	port := flag.Int("port", 5001, "Port to bind")
 	introducer := flag.String("introducer", "", "IP:port of introducer (leave blank if current VM is introducer)")
+	dropRate := flag.Int("drop-rate", 0, "Rate at which recieved packets are dropped")
+	drop_rate := dropRate
 	// mode := flag.String("mode", "gossip", "Gossip or SWIM")
 	flag.Parse()
 
@@ -122,6 +127,10 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 	for {
 		fmt.Println("------------------------------------------------------------------------------")
 		n, addr, err := conn.ReadFromUDP(buf)
+		random_drop := rand.Intn(100)
+		if random_drop < drop_rate {
+			continue
+		}
 		if err != nil {
 			fmt.Printf("recv error: %v at address: %v\n", err, addr)
 			continue
