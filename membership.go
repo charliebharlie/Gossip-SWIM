@@ -32,16 +32,17 @@ type Member struct {
 }
 
 type Ping_State string
+
 const (
-	FirstPing Ping_State = "First Ping"
+	FirstPing  Ping_State = "First Ping"
 	SecondPing Ping_State = "Second Ping"
 )
 
 type Pending struct {
-	ID			NodeID
-	Version		int
-	PingState	Ping_State
-	SentTime	time.Time
+	ID        NodeID
+	PingState Ping_State
+	SentTime  time.Time
+	Stop      chan struct{}
 }
 
 func (m Member) String() string {
@@ -53,7 +54,7 @@ type Message struct {
 	Type             string // "gossip", "join", "join_ack", "leave"
 	Sender           Member
 	MembershipUpdate []Member // changes (suspect/dead/joins/leaves)
-	TargetID        NodeID // for indirect pings
+	TargetID         NodeID   // for indirect pings
 
 }
 
@@ -61,4 +62,3 @@ func (m Message) String() string {
 	return fmt.Sprintf("Received %v from %v with %v updates",
 		m.Type, m.Sender, m.MembershipUpdate)
 }
-
