@@ -28,7 +28,6 @@ var cancel context.CancelFunc
 var delta int = 1
 var DEFAULT_DISSEMINATE int = 5
 var NUM_RANDOM_INDIRECT_PINGS int = 1
-var TIMEOUT int = 10
 var T_Gossip_Suspicion = time.Duration(1*delta) * time.Second
 var T_Gossip_Fail = time.Duration(2*delta) * time.Second
 
@@ -172,6 +171,7 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 		if random_drop < drop_rate {
 			continue
 		}
+
 		if err != nil {
 			fmt.Printf("recv error: %v at address: %v\n", err, addr)
 			continue
