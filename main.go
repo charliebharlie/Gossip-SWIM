@@ -31,7 +31,7 @@ var NUM_RANDOM_INDIRECT_PINGS int = 1
 var T_Gossip_Suspicion = time.Duration(1*delta) * time.Second
 var T_Gossip_Fail = time.Duration(2*delta) * time.Second
 
-var drop_rate = 0
+var drop_rate int = 0
 
 var T_SWIM_Direct = time.Duration(500*delta) * time.Millisecond
 var T_SWIM_Indirect = time.Duration(1000*delta) * time.Millisecond
@@ -54,9 +54,9 @@ func main() {
 	// VM testing
 	port := 5001
 	introducer := flag.String("introducer", "", "IP:port of introducer (leave blank if current VM is introducer)")
-	// dropRate := flag.Int("drop-rate", 0, "Rate at which recieved packets are dropped")
-	// drop_rate := dropRate
-	// mode := flag.String("mode", "gossip", "Gossip or SWIM")
+	dropRate := flag.Int("drop-rate", 0, "Rate at which recieved packets are dropped")
+	drop_rate = *dropRate
+
 	flag.Parse()
 
 	membershipList = make(map[NodeID]Member)
