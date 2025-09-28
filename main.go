@@ -32,6 +32,7 @@ var T_Gossip_Suspicion = time.Duration(1*delta) * time.Second
 var T_Gossip_Fail = time.Duration(2*delta) * time.Second
 
 var drop_rate int = 0
+var total_bytes int = 0
 
 var T_SWIM_Direct = time.Duration(500*delta) * time.Millisecond
 var T_SWIM_Indirect = time.Duration(1000*delta) * time.Millisecond
@@ -539,12 +540,14 @@ func gossipLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 				MembershipUpdate: piggyBackNodes,
 			}
 			data, _ := json.Marshal(msg)
+			total_bytes += len(data)
 			err = sendUDPto(peer, data, conn)
 			if err != nil {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 
 			}
 		}
+		fmt.Printf("Total sent bytes:  %d", total_bytes)
 	}
 }
 
@@ -602,6 +605,7 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 						fmt.Printf("Sending indirect ping to target: %v\n", targetID)
 
 						data, _ := json.Marshal(msg)
+						total_bytes += len(data)
 						err = sendUDPto(peerID, data, conn)
 						if err != nil {
 							fmt.Printf("Failed to send UDP packet: %v", err)
@@ -653,11 +657,13 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 			}
 
 			data, _ := json.Marshal(msg)
+			total_bytes += len(data)
 			err = sendUDPto(targetID, data, conn)
 			if err != nil {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 
 			}
+			fmt.Printf("Total sent bytes:  %d", total_bytes)
 		}
 	}
 }
