@@ -31,7 +31,7 @@ var NUM_RANDOM_INDIRECT_PINGS int = 1
 var T_Gossip_Suspicion = time.Duration(1*delta) * time.Second
 var T_Gossip_Fail = time.Duration(2*delta) * time.Second
 
-var drop_rate int = 0
+var drop_rate int = 10
 
 var T_SWIM_Direct = time.Duration(500*delta) * time.Millisecond
 var T_SWIM_Indirect = time.Duration(1000*delta) * time.Millisecond
@@ -398,7 +398,7 @@ func updateMembershipList(newNode Member) {
 				fmt.Printf("State Merged %v into %v\n", newNode, oldNode)
 			}
 
-			if rank(newNode.State) != rank(oldNode.State) {
+			if rank(newNode.State) != rank(oldNode.State) || newNode.Heartbeat > oldNode.Heartbeat {
 				// if the state is different, we update the TTL because a state change should be gossiped through the MembershipUpdate (piggybacking on heartbeats/acks)
 				newNode.Disseminate = DEFAULT_DISSEMINATE
 			}
