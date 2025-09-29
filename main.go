@@ -1,18 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"os"
-	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -23,6 +24,9 @@ var mu sync.RWMutex
 var suspicionTimers map[NodeID]chan struct{}
 var gossipAliveTimers map[NodeID]chan struct{}
 var cancel context.CancelFunc
+var currentMode string = "Gossip"
+var currentSuspicionMode string = "nosuspect"
+var total int
 
 // Hyperparamters
 var delta int = 1
@@ -53,7 +57,7 @@ func main() {
 	// port := flag.Int("port", 5001, "Port to bind")
 
 	// VM testing
-	port := 5001
+	port := 5003
 	introducer := flag.String("introducer", "", "IP:port of introducer (leave blank if current VM is introducer)")
 	dropRate := flag.String("dropRate", "0", "Rate at which recieved packets are dropped")
 
@@ -88,6 +92,7 @@ func main() {
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		fmt.Println("Error binding UDP:", err)
+		os.Exit(1)
 	}
 	defer conn.Close()
 
@@ -118,32 +123,116 @@ func main() {
 		fmt.Println("I am the introducer")
 	}
 
+	// Start in SWIM with nosuspect
+	switchTo(currentMode, currNodeID, conn)
+
+	// Start the command loop in the background
+	go commandLoop(os.Stdin, os.Stdout, currNodeID, conn)
+
+	// Start the command server in the background
+	go commandServerLoop(currNodeID, conn)
+
 	// Start receiver loop in the background
 	go recvLoop(conn, currNodeID)
 
-	// Start gossip loop in the background
-	switchTo("Gossip", currNodeID, conn)
+	// Stop from exiting once main reaches here
+	select {}
+}
 
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGINT)
+func commandServerLoop(currNodeID NodeID, conn *net.UDPConn) {
+	listener, err := net.Listen("tcp", "127.0.0.1:9000")
+	if err != nil {
+		fmt.Printf("command server error: %v\n", err)
+		return
+	}
 
-	for {
-		// runs in the background, listening for one of the signals, once it receives a signal, execute the code inside the scope
-		s := <-sigs
-		switch s {
-		case syscall.SIGUSR1:
-			fmt.Println("Switching to Gossip")
-			switchTo("Gossip", currNodeID, conn)
-
-		case syscall.SIGUSR2:
-			fmt.Println("Switching to SWIM")
-			switchTo("SWIM", currNodeID, conn)
-
-		case syscall.SIGINT:
-			fmt.Println("Leaving group...")
-			leaveGroup(currNodeID, conn)
-			return
+	// run a function that listens for any commands sent to port 9000
+	go func() {
+		for {
+			clientConn, err := listener.Accept()
+			if err != nil {
+				continue
+			}
+			go commandLoop(clientConn, clientConn, currNodeID, conn)
 		}
+	}()
+}
+
+func commandLoop(clientReader io.ReadCloser, clientWriter io.Writer, currNodeID NodeID, conn *net.UDPConn) {
+	defer clientReader.Close()
+
+	scanner := bufio.NewScanner(clientReader)
+	for scanner.Scan() {
+		line := scanner.Text()
+		commands := strings.Fields(line)
+		if len(commands) == 0 {
+			continue
+		}
+
+		switch commands[0] {
+		case "list_mem":
+			mu.RLock()
+			for _, member := range membershipList {
+				// if member.State != Dead {
+				fmt.Fprintln(clientWriter, member)
+				// }
+			}
+			mu.RUnlock()
+
+		case "list_self":
+			fmt.Fprintln(clientWriter, currNodeID)
+
+		case "leave":
+			leaveGroup(currNodeID, conn)
+			fmt.Fprintln(clientWriter, "Node leaving group")
+
+		case "display_suspects":
+			mu.RLock()
+			for _, member := range membershipList {
+				if member.State == Suspect {
+					fmt.Fprintf(clientWriter, "Suspect: %v\n", member.ID)
+				}
+			}
+			mu.RUnlock()
+
+		case "switch":
+			if len(commands) != 3 {
+				fmt.Fprintln(clientWriter, "Usage: switch({Gossip, SWIM} {suspect, nosuspect})")
+				continue
+			}
+
+			currentMode = commands[1]
+			currentSuspicionMode = commands[2]
+			switchTo(currentMode, currNodeID, conn)
+			sendSwitch(currNodeID, conn)
+			fmt.Fprintf(clientWriter, "Switched to <%s, %s>\n", currentMode, currentSuspicionMode)
+
+		case "display_protocol":
+			fmt.Fprintf(clientWriter, "<%s, %s>\n", currentMode, currentSuspicionMode)
+
+		default:
+			fmt.Fprintf(clientWriter, "Unknown command: %s\n", commands[0])
+		}
+	}
+}
+
+func sendSwitch(currNodeID NodeID, conn *net.UDPConn) {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	for id := range membershipList {
+		if id == currNodeID {
+			continue
+		}
+
+		msg := Message{
+			Type:      "switch",
+			Sender:    membershipList[currNodeID],
+			Mode:      currentMode,
+			Suspicion: currentSuspicionMode,
+		}
+		data, _ := json.Marshal(msg)
+		sendUDPto(id, data, conn)
 	}
 }
 
@@ -166,7 +255,7 @@ func switchTo(mode string, currNodeID NodeID, conn *net.UDPConn) {
 func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 	buf := make([]byte, 4096)
 	for {
-		fmt.Println("------------------------------------------------------------------------------")
+		// fmt.Println("------------------------------------------------------------------------------")
 		n, addr, err := conn.ReadFromUDP(buf)
 		random_drop := rand.Intn(100)
 		if random_drop < drop_rate {
@@ -233,7 +322,7 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 		case "join_ack":
 			// Add the fullTable to the newNode's table
 			for _, member := range msg.MembershipUpdate {
-				updateMembershipList(member)
+				updateMembershipList(member, false)
 			}
 
 		case "leave":
@@ -246,13 +335,19 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			membershipList[msg.Sender.ID] = currNode
 			mu.Unlock()
 
+		case "switch":
+			// Received a switch msg, should switch node to other protocol
+			currentMode = msg.Mode
+			currentSuspicionMode = msg.Suspicion
+			switchTo(currentMode, currNodeID, conn)
+
 		case "gossip":
 			// Refresh the sender node's entry in currNode's Membership List as we got a message from them
-			updateMembershipList(msg.Sender)
+			updateMembershipList(msg.Sender, true)
 
 			// Merge piggybacked updates
 			for _, member := range msg.MembershipUpdate {
-				updateMembershipList(member)
+				updateMembershipList(member, false)
 			}
 
 			refreshGossipSuspicion(msg.Sender.ID)
@@ -270,10 +365,10 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			if err != nil {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 			}
-			updateMembershipList(msg.Sender)
+			updateMembershipList(msg.Sender, true)
 
 			for _, member := range msg.MembershipUpdate {
-				updateMembershipList(member)
+				updateMembershipList(member, false)
 			}
 
 		case "swim_ack":
@@ -308,10 +403,10 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			if !ok1 && !ok2 {
 				os.Exit(1)
 			}
-			updateMembershipList(msg.Sender)
+			updateMembershipList(msg.Sender, true)
 
 			for _, member := range msg.MembershipUpdate {
-				updateMembershipList(member)
+				updateMembershipList(member, false)
 			}
 
 		case "swim_indirect_ping":
@@ -331,10 +426,10 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			if err != nil {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 			}
-			updateMembershipList(msg.Sender)
+			updateMembershipList(msg.Sender, true)
 
 			for _, member := range msg.MembershipUpdate {
-				updateMembershipList(member)
+				updateMembershipList(member, false)
 			}
 
 		case "swim_indirect_ack":
@@ -354,15 +449,14 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 
 			senderID := msg.Sender.ID
 			delete(pendingList, senderID)
-			updateMembershipList(msg.Sender)
+			updateMembershipList(msg.Sender, true)
 
 			for _, member := range msg.MembershipUpdate {
-				updateMembershipList(member)
+				updateMembershipList(member, false)
 			}
 		}
 
 		fmt.Println("----------- AFTER -----------")
-		// fmt.Println(msg.Sender)
 
 		fmt.Println("Current Table: ")
 		for _, member := range membershipList {
@@ -372,7 +466,7 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 	}
 }
 
-func updateMembershipList(newNode Member) {
+func updateMembershipList(newNode Member, isSourceNode bool) {
 	mu.Lock()
 	defer mu.Unlock()
 	oldNode, exists := membershipList[newNode.ID]
@@ -385,19 +479,27 @@ func updateMembershipList(newNode Member) {
 		// bug here... if we don't delete the Dead node from the pendingList after it comes back, the PingState remains the same, so it'll always be suspect...
 		delete(pendingList, newNode.ID)
 
-		fmt.Printf("Updated %v to %v\nState: %s\nVersion: %d \n", oldNode.ID, newNode.ID, newNode.State, newNode.Version)
+		// fmt.Printf("Updated %v to %v\nState: %s\nVersion: %d \n", oldNode.ID, newNode.ID, newNode.State, newNode.Version)
 		return
 	}
+
+	// if isSourceNode && oldNode.State == Suspect && newNode.State == Alive && newNode.Heartbeat >= oldNode.Heartbeat {
+	// 	newNode.Disseminate = DEFAULT_DISSEMINATE
+	// 	newNode.LastUpdate = time.Now()
+	// 	membershipList[newNode.ID] = newNode
+	// 	fmt.Printf("Revived %v from Suspect to Alive\n", newNode.ID)
+	// 	return
+	// }
 
 	// if the versions are the same, we compare the heartbeats or states and take according to (alive < suspect < dead). TODO: If the newNode entry's State is Dead, we accept it no matter what. <--- Check this (not sure why, the system works much better for NOT taking Dead state nodes no matter what [ie. we consider a larger Heartbeat value instead])
 	if newNode.Version == oldNode.Version {
 		if (newNode.Heartbeat > oldNode.Heartbeat) || (newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State)) {
-			if newNode.Heartbeat > oldNode.Heartbeat {
-				fmt.Printf("Heartbeat Merged %v into %v\n", newNode, oldNode)
-			}
-			if newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State) {
-				fmt.Printf("State Merged %v into %v\n", newNode, oldNode)
-			}
+			// if newNode.Heartbeat > oldNode.Heartbeat {
+			// 	fmt.Printf("Heartbeat Merged %v into %v\n", newNode, oldNode)
+			// }
+			// if newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State) {
+			// 	fmt.Printf("State Merged %v into %v\n", newNode, oldNode)
+			// }
 
 			if rank(newNode.State) != rank(oldNode.State) || newNode.Heartbeat > oldNode.Heartbeat {
 				// if the state is different, we update the TTL because a state change should be gossiped through the MembershipUpdate (piggybacking on heartbeats/acks)
@@ -447,12 +549,16 @@ func refreshGossipSuspicion(currNodeID NodeID) {
 			mu.Lock()
 			currNode := membershipList[currNodeID]
 			if currNode.State == Alive {
-				currNode.State = Suspect
-				currNode.Disseminate = DEFAULT_DISSEMINATE
-				membershipList[currNodeID] = currNode
+				if currentSuspicionMode == "suspect" {
+					currNode.State = Suspect
+					currNode.Disseminate = DEFAULT_DISSEMINATE
+					membershipList[currNodeID] = currNode
 
-				fmt.Printf("Node %v is suspected\n", currNodeID)
-				go startFailTimer(currNodeID, T_Gossip_Fail)
+					fmt.Printf("Node %v is suspected\n", currNodeID)
+					go startFailTimer(currNodeID, T_Gossip_Fail)
+				} else {
+					go startFailTimer(currNodeID, T_Gossip_Fail)
+				}
 			}
 			mu.Unlock()
 		case <-stop:
@@ -482,11 +588,12 @@ func startFailTimer(currNodeID NodeID, failTimeout time.Duration) {
 		case <-time.After(failTimeout):
 			mu.Lock()
 			currNode := membershipList[currNodeID]
-			if currNode.State == Suspect {
+			if currNode.State == Suspect || (currNode.State == Alive && currentSuspicionMode == "nosuspect") {
 				currNode.State = Dead
 				currNode.Disseminate = DEFAULT_DISSEMINATE
 				membershipList[currNodeID] = currNode
 
+				delete(pendingList, currNodeID)
 				fmt.Printf("Node %v is Dead\n", currNodeID)
 			}
 			mu.Unlock()
@@ -502,7 +609,7 @@ func sendUDPto(receiverNode NodeID, data []byte, conn *net.UDPConn) error {
 	if err != nil {
 		return fmt.Errorf("send error: %e", err)
 	} else {
-		fmt.Printf("Sent to %v\n", receiverNode)
+		// fmt.Printf("Sent to %v\n", receiverNode)
 		return nil
 	}
 }
@@ -544,8 +651,10 @@ func gossipLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 			err = sendUDPto(peer, data, conn)
 			if err != nil {
 				fmt.Printf("Failed to send UDP packet: %v", err)
-
 			}
+			total += len(data)
+			// fmt.Println("Total Length of data: ", len(data))
+			// fmt.Println("Total Length of data: ", total)
 		}
 		fmt.Printf("Total sent bytes:  %d", total_bytes)
 	}
@@ -560,7 +669,7 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("Stopping gossip loop")
+			fmt.Println("Stopping SWIM loop")
 			return
 
 		case <-ticker.C:
@@ -584,7 +693,7 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 						}
 
 						if err != nil {
-							fmt.Printf("error: %v", err)
+							// fmt.Printf("error: %v", err)
 							continue
 						}
 
@@ -602,7 +711,7 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 						pending.PingState = SecondPing
 						pending.SentTime = time.Now()
 						pendingList[targetID] = pending
-						fmt.Printf("Sending indirect ping to target: %v\n", targetID)
+						// fmt.Printf("Sending indirect ping to target: %v\n", targetID)
 
 						data, _ := json.Marshal(msg)
 						total_bytes += len(data)
@@ -619,16 +728,21 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 					if ok {
 						// mark as suspected
 						if targetNode.State == Alive {
-							targetNode.State = Suspect
-							targetNode.Disseminate = DEFAULT_DISSEMINATE
-							membershipList[targetID] = targetNode
-							fmt.Printf("Node %v is suspected\n", targetID)
-							go startFailTimer(targetID, T_SWIM_Fail)
-							// delete(pendingList, targetID)
+							if currentSuspicionMode == "suspect" {
+								targetNode.State = Suspect
+								targetNode.Disseminate = DEFAULT_DISSEMINATE
+								membershipList[targetID] = targetNode
+								fmt.Printf("Node %v is suspected\n", targetID)
+								go startFailTimer(targetID, T_SWIM_Fail)
+								// delete(pendingList, targetID)
+							} else {
+								go startFailTimer(targetID, T_SWIM_Fail)
+							}
 						}
 					}
+					delete(pendingList, targetID)
 					mu.Unlock()
-					fmt.Printf("TIME: %v\n", time.Now().Sub(pendingList[targetID].SentTime))
+					// fmt.Printf("TIME: %v\n", time.Now().Sub(pendingList[targetID].SentTime))
 
 				}
 			}
@@ -636,7 +750,7 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 			piggyBackNodes = getPiggyBackNodes()
 			targetID, err := getRandomNode(currNodeID)
 			if err != nil {
-				fmt.Printf("error: %v", err)
+				// fmt.Printf("error: %v", err)
 				continue
 			}
 
@@ -718,7 +832,7 @@ func leaveGroup(currNode NodeID, conn *net.UDPConn) {
 
 	peer, err := getRandomNode(currNode)
 	if err != nil {
-		fmt.Printf("error: %v", err)
+		// fmt.Printf("error: %v", err)
 	} else {
 		err = sendUDPto(peer, data, conn)
 		if err != nil {
