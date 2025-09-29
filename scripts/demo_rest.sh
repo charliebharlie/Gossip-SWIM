@@ -31,7 +31,7 @@ done
 
 # wait 20s
 echo "Waiting 20 seconds..."
-# sleep 20
+sleep 20
 
 # start the remaining nodes
 for host in "${hosts[@]:5}"; do

@@ -173,9 +173,9 @@ func commandLoop(clientReader io.ReadCloser, clientWriter io.Writer, currNodeID 
 		case "list_mem":
 			mu.RLock()
 			for _, member := range membershipList {
-				// if member.State != Dead {
-				fmt.Fprintln(clientWriter, member)
-				// }
+				if member.State != Dead {
+					fmt.Fprintln(clientWriter, member)
+				}
 			}
 			mu.RUnlock()
 
