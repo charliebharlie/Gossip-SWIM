@@ -44,23 +44,16 @@ var T_SWIM_Suspicion = T_SWIM_Direct + T_SWIM_Indirect
 var T_SWIM_Fail = time.Duration(1*delta)*time.Second + time.Duration(500*delta)*time.Millisecond
 
 func main() {
-	// fmt.Println(float64(T_SWIM_Fail)/float64(time.Second), float64(T_SWIM_Suspicion)/float64(time.Second))
-	// os.Exit(0)
-
-	// Command Line Arguments
+	port := 5003
 	hostname, err := os.Hostname()
 	if err != nil {
 		fmt.Printf("Could not find hostname\n")
 	}
 
+	// Command Line Arguments
 	ip := flag.String("ip", hostname, "VM hostname")
-	// port := flag.Int("port", 5001, "Port to bind")
-
-	// VM testing
-	port := 5003
 	introducer := flag.String("introducer", "", "IP:port of introducer (leave blank if current VM is introducer)")
 	dropRate := flag.String("dropRate", "0", "Rate at which recieved packets are dropped")
-
 	flag.Parse()
 	drop_rate, _ = strconv.Atoi(*dropRate)
 
@@ -108,10 +101,7 @@ func main() {
 			MembershipUpdate: []Member{},
 		}
 
-		data, err := json.Marshal(msg)
-		if err != nil {
-			fmt.Printf("Error handling Marshaling JSON: %v", err)
-		}
+		data, _ := json.Marshal(msg)
 
 		err = sendUDPto(introducerNode, data, conn)
 		if err != nil {
@@ -123,16 +113,14 @@ func main() {
 		fmt.Println("I am the introducer")
 	}
 
-	// Start in SWIM with nosuspect
 	switchTo(currentProtocol, currNodeID, conn)
 
-	// Start the command loop in the background
+	// Start the command loop in the background (for interactive mode)
 	go commandLoop(os.Stdin, os.Stdout, currNodeID, conn)
 
-	// Start the command server in the background
+	// Start the command server in the background (for detached mode)
 	go commandServerLoop(currNodeID, conn)
 
-	// Start receiver loop in the background
 	go recvLoop(conn, currNodeID)
 
 	// Stop from exiting once main reaches here
@@ -146,7 +134,7 @@ func commandServerLoop(currNodeID NodeID, conn *net.UDPConn) {
 		return
 	}
 
-	// run a function that listens for any commands sent to port 9000
+	// run a function that listens for any commands sent to port 9000 and executes the provided commands in the commandLoop
 	go func() {
 		for {
 			clientConn, err := listener.Accept()
@@ -237,8 +225,10 @@ func sendSwitch(currNodeID NodeID, conn *net.UDPConn) {
 }
 
 func switchTo(mode string, currNodeID NodeID, conn *net.UDPConn) {
+
+	// stop the old loop of the other protocol
 	if cancel != nil {
-		cancel() // stop old loop
+		cancel()
 	}
 
 	ctx, currentCancel := context.WithCancel(context.Background())
@@ -255,7 +245,6 @@ func switchTo(mode string, currNodeID NodeID, conn *net.UDPConn) {
 func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 	buf := make([]byte, 4096)
 	for {
-		// fmt.Println("------------------------------------------------------------------------------")
 		n, addr, err := conn.ReadFromUDP(buf)
 		random_drop := rand.Intn(100)
 		if random_drop < drop_rate {
@@ -273,13 +262,6 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			fmt.Println("unmarshal error:", err)
 			continue
 		}
-
-		// fmt.Println(msg)
-		// fmt.Println("----------- BEFORE -----------")
-		// fmt.Println("Current Table: ")
-		// for _, member := range membershipList {
-		// 	fmt.Println(member)
-		// }
 
 		// Join and Leave handling
 		// Join: Only introducer and new node should use these messages
@@ -412,7 +394,7 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 
 		case "swim_indirect_ping":
 			// ping node based on directions of another node
-			targetNodeID := msg.TargetID // add
+			targetNodeID := msg.TargetID
 			ping := Message{
 				Type:             "swim_ping",
 				Sender:           membershipList[currNodeID],
@@ -422,6 +404,7 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			// indirect node's indirectPingTracking[target node] = original node
 			indirectPingTracking[targetNodeID] = msg.Sender.ID
 			data, _ := json.Marshal(ping)
+
 			// send to target node
 			err := sendUDPto(targetNodeID, data, conn)
 			if err != nil {
@@ -434,20 +417,6 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			}
 
 		case "swim_indirect_ack":
-			// send ack to node that wanted this node to ping another node
-			// ack := Message{
-			// 	Type:             "swim_ack",
-			// 	Sender:           msg.Sender,
-			// 	MembershipUpdate: []Member{},
-			// }
-			//
-			// data, _ := json.Marshal(ack)
-			// // send back to whoever wanted this to be sent
-			// err := sendUDPto(indirectPingTracking[msg.Sender.ID], data, conn)
-			// if err != nil {
-			// 	fmt.Printf("Failed to send UDP packet: %v", err)
-			// }
-
 			senderID := msg.Sender.ID
 			delete(pendingList, senderID)
 			updateMembershipList(msg.Sender, true)
@@ -463,7 +432,6 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 		// for _, member := range membershipList {
 		// 	fmt.Println(member)
 		// }
-
 	}
 }
 
@@ -488,19 +456,12 @@ func updateMembershipList(newNode Member, isSourceNode bool) {
 		newNode.Disseminate = DEFAULT_DISSEMINATE
 		newNode.LastUpdate = time.Now()
 		membershipList[newNode.ID] = newNode
-		// fmt.Printf("Changed %v from Suspect to Alive\n", newNode.ID)
 		return
 	}
 
-	// if the versions are the same, we compare the heartbeats or states and take according to (alive < suspect < dead). TODO: If the newNode entry's State is Dead, we accept it no matter what. <--- Check this (not sure why, the system works much better for NOT taking Dead state nodes no matter what [ie. we consider a larger Heartbeat value instead])
+	// if the versions are the same, we compare the heartbeats or states and take according to (alive < suspect < dead).
 	if newNode.Version == oldNode.Version {
 		if (newNode.Heartbeat > oldNode.Heartbeat) || (newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State)) {
-			// if newNode.Heartbeat > oldNode.Heartbeat {
-			// 	fmt.Printf("Heartbeat Merged %v into %v\n", newNode, oldNode)
-			// }
-			// if newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State) {
-			// 	fmt.Printf("State Merged %v into %v\n", newNode, oldNode)
-			// }
 
 			if newNode.State == Dead {
 				fmt.Printf("Node %v is dead\n", newNode.ID)
@@ -509,7 +470,7 @@ func updateMembershipList(newNode Member, isSourceNode bool) {
 			}
 
 			if rank(newNode.State) != rank(oldNode.State) || newNode.Heartbeat > oldNode.Heartbeat {
-				// if the state is different, we update the TTL because a state change should be gossiped through the MembershipUpdate (piggybacking on heartbeats/acks)
+				// if the state is different or has a greater heartbeat, we update the TTL because a state change should be gossiped through the MembershipUpdate (piggybacking on heartbeats/acks)
 				newNode.Disseminate = DEFAULT_DISSEMINATE
 			}
 			newNode.LastUpdate = time.Now()
@@ -661,10 +622,7 @@ func gossipLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 			}
 			total += len(data)
-			// fmt.Println("Total Length of data: ", len(data))
-			// fmt.Println("Total Length of data: ", total)
 		}
-		// fmt.Printf("Total sent bytes:  %d", total_bytes)
 	}
 }
 
@@ -751,7 +709,6 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 					}
 					delete(pendingList, targetID)
 					mu.Unlock()
-					// fmt.Printf("TIME: %v\n", time.Now().Sub(pendingList[targetID].SentTime))
 
 				}
 			}
@@ -786,7 +743,6 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 
 			}
-			// fmt.Printf("Total sent bytes:  %d", total_bytes)
 		}
 	}
 }
@@ -866,10 +822,6 @@ func getVersion() (int, error) {
 		return 0, err
 	}
 
-	// TODO: Test on local machine for now
-	// vmNumber := 0
-
-	// TODO: Changed this back to /home/shared/incarnation_%d.log for testing on vms
 	filePath := fmt.Sprintf("/home/cliu132/mp2/incarnation_%d.log", vmNumber)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
