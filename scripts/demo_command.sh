@@ -10,10 +10,11 @@ hosts=(
 	fa25-cs425-a909.cs.illinois.edu
 	fa25-cs425-a910.cs.illinois.edu
 )
-read -p "Enter introducer machine number (1-10): " intro_num
-index=$((intro_num - 1))
-introducer=${hosts[$index]}
-echo "Chosen introducer: $introducer"
+read -p "Enter machine number (1-10): " num
+index=$((num - 1))
+host=${hosts[$index]}
+echo "Chosen vm: $host"
+read -p "Enter command: " command
+echo "Command: $host"
 
-# start introducer
-ssh -t -i ~/.ssh/id_ed25520 cliu132@$introducer "cd ~/mp2 && go run . --ip=$introducer --dropRate=0"
+ssh -t -i ~/.ssh/id_ed25520 cliu132@$host "echo '$command' | nc localhost 9000"

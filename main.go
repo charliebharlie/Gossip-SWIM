@@ -24,7 +24,7 @@ var mu sync.RWMutex
 var suspicionTimers map[NodeID]chan struct{}
 var gossipAliveTimers map[NodeID]chan struct{}
 var cancel context.CancelFunc
-var currentMode string = "Gossip"
+var currentProtocol string = "SWIM"
 var currentSuspicionMode string = "nosuspect"
 var total int
 
@@ -32,8 +32,8 @@ var total int
 var delta int = 1
 var DEFAULT_DISSEMINATE int = 5
 var NUM_RANDOM_INDIRECT_PINGS int = 1
-var T_Gossip_Suspicion = time.Duration(1*delta) * time.Second
-var T_Gossip_Fail = time.Duration(2*delta) * time.Second
+var T_Gossip_Suspicion = time.Duration(3*delta) * time.Second
+var T_Gossip_Fail = time.Duration(6*delta) * time.Second
 
 var drop_rate int = 0
 var total_bytes int = 0
@@ -124,7 +124,7 @@ func main() {
 	}
 
 	// Start in SWIM with nosuspect
-	switchTo(currentMode, currNodeID, conn)
+	switchTo(currentProtocol, currNodeID, conn)
 
 	// Start the command loop in the background
 	go commandLoop(os.Stdin, os.Stdout, currNodeID, conn)
@@ -201,14 +201,14 @@ func commandLoop(clientReader io.ReadCloser, clientWriter io.Writer, currNodeID 
 				continue
 			}
 
-			currentMode = commands[1]
+			currentProtocol = commands[1]
 			currentSuspicionMode = commands[2]
-			switchTo(currentMode, currNodeID, conn)
+			switchTo(currentProtocol, currNodeID, conn)
 			sendSwitch(currNodeID, conn)
-			fmt.Fprintf(clientWriter, "Switched to <%s, %s>\n", currentMode, currentSuspicionMode)
+			fmt.Fprintf(clientWriter, "Switched to <%s, %s>\n", currentProtocol, currentSuspicionMode)
 
 		case "display_protocol":
-			fmt.Fprintf(clientWriter, "<%s, %s>\n", currentMode, currentSuspicionMode)
+			fmt.Fprintf(clientWriter, "<%s, %s>\n", currentProtocol, currentSuspicionMode)
 
 		default:
 			fmt.Fprintf(clientWriter, "Unknown command: %s\n", commands[0])
@@ -228,7 +228,7 @@ func sendSwitch(currNodeID NodeID, conn *net.UDPConn) {
 		msg := Message{
 			Type:      "switch",
 			Sender:    membershipList[currNodeID],
-			Mode:      currentMode,
+			Mode:      currentProtocol,
 			Suspicion: currentSuspicionMode,
 		}
 		data, _ := json.Marshal(msg)
@@ -274,12 +274,12 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			continue
 		}
 
-		fmt.Println(msg)
-		fmt.Println("----------- BEFORE -----------")
-		fmt.Println("Current Table: ")
-		for _, member := range membershipList {
-			fmt.Println(member)
-		}
+		// fmt.Println(msg)
+		// fmt.Println("----------- BEFORE -----------")
+		// fmt.Println("Current Table: ")
+		// for _, member := range membershipList {
+		// 	fmt.Println(member)
+		// }
 
 		// Join and Leave handling
 		// Join: Only introducer and new node should use these messages
@@ -317,6 +317,7 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			if err != nil {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 			}
+
 			mu.Unlock()
 
 		case "join_ack":
@@ -337,9 +338,9 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 
 		case "switch":
 			// Received a switch msg, should switch node to other protocol
-			currentMode = msg.Mode
+			currentProtocol = msg.Mode
 			currentSuspicionMode = msg.Suspicion
-			switchTo(currentMode, currNodeID, conn)
+			switchTo(currentProtocol, currNodeID, conn)
 
 		case "gossip":
 			// Refresh the sender node's entry in currNode's Membership List as we got a message from them
@@ -456,12 +457,12 @@ func recvLoop(conn *net.UDPConn, currNodeID NodeID) {
 			}
 		}
 
-		fmt.Println("----------- AFTER -----------")
-
-		fmt.Println("Current Table: ")
-		for _, member := range membershipList {
-			fmt.Println(member)
-		}
+		// fmt.Println("----------- AFTER -----------")
+		//
+		// fmt.Println("Current Table: ")
+		// for _, member := range membershipList {
+		// 	fmt.Println(member)
+		// }
 
 	}
 }
@@ -483,13 +484,13 @@ func updateMembershipList(newNode Member, isSourceNode bool) {
 		return
 	}
 
-	// if isSourceNode && oldNode.State == Suspect && newNode.State == Alive && newNode.Heartbeat >= oldNode.Heartbeat {
-	// 	newNode.Disseminate = DEFAULT_DISSEMINATE
-	// 	newNode.LastUpdate = time.Now()
-	// 	membershipList[newNode.ID] = newNode
-	// 	fmt.Printf("Revived %v from Suspect to Alive\n", newNode.ID)
-	// 	return
-	// }
+	if isSourceNode && oldNode.State == Suspect && newNode.State == Alive && newNode.Heartbeat >= oldNode.Heartbeat {
+		newNode.Disseminate = DEFAULT_DISSEMINATE
+		newNode.LastUpdate = time.Now()
+		membershipList[newNode.ID] = newNode
+		// fmt.Printf("Changed %v from Suspect to Alive\n", newNode.ID)
+		return
+	}
 
 	// if the versions are the same, we compare the heartbeats or states and take according to (alive < suspect < dead). TODO: If the newNode entry's State is Dead, we accept it no matter what. <--- Check this (not sure why, the system works much better for NOT taking Dead state nodes no matter what [ie. we consider a larger Heartbeat value instead])
 	if newNode.Version == oldNode.Version {
@@ -500,6 +501,12 @@ func updateMembershipList(newNode Member, isSourceNode bool) {
 			// if newNode.Heartbeat == oldNode.Heartbeat && rank(newNode.State) > rank(oldNode.State) {
 			// 	fmt.Printf("State Merged %v into %v\n", newNode, oldNode)
 			// }
+
+			if newNode.State == Dead {
+				fmt.Printf("Node %v is dead\n", newNode.ID)
+			} else if newNode.State == Suspect {
+				fmt.Printf("Node %v is suspected\n", newNode.ID)
+			}
 
 			if rank(newNode.State) != rank(oldNode.State) || newNode.Heartbeat > oldNode.Heartbeat {
 				// if the state is different, we update the TTL because a state change should be gossiped through the MembershipUpdate (piggybacking on heartbeats/acks)
@@ -593,10 +600,11 @@ func startFailTimer(currNodeID NodeID, failTimeout time.Duration) {
 				currNode.Disseminate = DEFAULT_DISSEMINATE
 				membershipList[currNodeID] = currNode
 
+				fmt.Printf("Node %v is dead\n", currNodeID)
 				delete(pendingList, currNodeID)
-				fmt.Printf("Node %v is Dead\n", currNodeID)
 			}
 			mu.Unlock()
+
 		case <-stop:
 			return
 		}
@@ -616,7 +624,7 @@ func sendUDPto(receiverNode NodeID, data []byte, conn *net.UDPConn) error {
 
 func gossipLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 	// Tuning how often the nodes should gossip
-	ticker := time.NewTicker(time.Duration(1000*delta) * time.Millisecond)
+	ticker := time.NewTicker(time.Duration(500*delta) * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -634,7 +642,7 @@ func gossipLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 
 			peer, err := getRandomNode(currNodeID)
 			if err != nil {
-				fmt.Printf("error: %v", err)
+				// fmt.Printf("error: %v", err)
 				continue
 			}
 
@@ -656,7 +664,7 @@ func gossipLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 			// fmt.Println("Total Length of data: ", len(data))
 			// fmt.Println("Total Length of data: ", total)
 		}
-		fmt.Printf("Total sent bytes:  %d", total_bytes)
+		// fmt.Printf("Total sent bytes:  %d", total_bytes)
 	}
 }
 
@@ -732,6 +740,7 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 								targetNode.State = Suspect
 								targetNode.Disseminate = DEFAULT_DISSEMINATE
 								membershipList[targetID] = targetNode
+
 								fmt.Printf("Node %v is suspected\n", targetID)
 								go startFailTimer(targetID, T_SWIM_Fail)
 								// delete(pendingList, targetID)
@@ -777,7 +786,7 @@ func swimLoop(ctx context.Context, currNodeID NodeID, conn *net.UDPConn) {
 				fmt.Printf("Failed to send UDP packet: %v", err)
 
 			}
-			fmt.Printf("Total sent bytes:  %d", total_bytes)
+			// fmt.Printf("Total sent bytes:  %d", total_bytes)
 		}
 	}
 }
@@ -804,8 +813,7 @@ func getRandomNode(currNodeID NodeID) (NodeID, error) {
 
 	candidates := []NodeID{}
 	for id, member := range membershipList {
-		_, exists := pendingList[id]
-		if id == currNodeID || exists || member.State == Dead {
+		if id == currNodeID || member.State == Dead {
 			continue
 		}
 

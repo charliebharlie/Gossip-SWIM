@@ -46,8 +46,8 @@ type Pending struct {
 }
 
 func (m Member) String() string {
-	return fmt.Sprintf("[%v, State=%s, Heartbeat=%d Disseminate=%d]",
-		m.ID, m.State, m.Heartbeat, m.Disseminate)
+	return fmt.Sprintf("[%v, State=%s, Heartbeat=%d, Version=%d, Disseminate=%d]",
+		m.ID, m.State, m.Heartbeat, m.Version, m.Disseminate)
 }
 
 type Message struct {
@@ -60,6 +60,6 @@ type Message struct {
 }
 
 func (m Message) String() string {
-	return fmt.Sprintf("Received %v from %v with %v updates",
-		m.Type, m.Sender, m.MembershipUpdate)
+	return fmt.Sprintf("Received %v from %v of Version %v with %v updates",
+		m.Type, m.Sender, m.Sender.Version, m.MembershipUpdate)
 }
