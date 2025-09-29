@@ -55,7 +55,8 @@ type Message struct {
 	Sender           Member
 	MembershipUpdate []Member // changes (suspect/dead/joins/leaves)
 	TargetID         NodeID   // for indirect pings
-
+	Mode             string
+	Suspicion        string
 }
 
 func (m Message) String() string {

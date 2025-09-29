@@ -24,12 +24,12 @@ for host in "${hosts[@]}"; do
 	echo "Starting node on $host..."
 
 	ssh -i ~/.ssh/id_ed25520 cliu132@"$host" bash -s <<EOF
-pids=\$(lsof -t -i :5001)
+pids=\$(lsof -t -i :5003)
 if [ -n "\$pids" ]; then
-  echo "Killing processes on port 5001: \$pids"
+  echo "Killing processes on port 5003: \$pids"
   kill -9 \$pids
 else
-  echo "No process using port 5001"
+  echo "No process using port 5003"
 fi
 
 cd ~/mp2
@@ -40,21 +40,21 @@ touch /home/cliu132/mp2/incarnation_$host.log
 
 if [ "$host" = "$introducer" ]; then
     echo "Starting introducer on $host"
-    nohup go run . --ip=$host > \$LOGFILE 2>&1 &
+    nohup go run . --ip=$host --drop-rate=0 > \$LOGFILE 2>&1 &
 else
     echo "Starting node on $host (introducer=$introducer)"
-    nohup go run . --ip=$host --introducer=$introducer:5001 > \$LOGFILE 2>&1 &
+    nohup go run . --ip=$host --introducer=$introducer:5003 --drop-rate=0  > \$LOGFILE 2>&1 &
 fi
 EOF
 done
 
 # echo "Waiting 10 seconds..."
-# sleep 10
+# sleep 60
 #
 # # Clean up the nodes
 # for host in "${hosts[@]}"; do
 # 	echo "Stopping node on $host..."
-# 	ssh -i ~/.ssh/id_ed25520 cliu132@"$host" "pids=\$(lsof -t -i :5001); [ -n \"\$pids\" ] && kill -SIGINT \$pids"
+# 	ssh -i ~/.ssh/id_ed25520 cliu132@"$host" "pids=\$(lsof -t -i :5003); [ -n \"\$pids\" ] && kill -SIGINT \$pids"
 # done
 #
 # echo "Killed all processes on nodes, check ~/mp2/logs for the log of the vm's run"

@@ -1,20 +1,6 @@
 #!/bin/bash
 
-read -p "Enter mode (gossip/swim): " MODE
-
-case "$MODE" in
-gossip)
-	SIGNAL="SIGUSR1"
-	;;
-swim)
-	SIGNAL="SIGUSR2"
-	;;
-*)
-	echo "Invalid mode: $MODE"
-	exit 1
-	;;
-esac
-
+# List of machines
 hosts=(
 	fa25-cs425-a901.cs.illinois.edu
 	fa25-cs425-a902.cs.illinois.edu
@@ -28,17 +14,22 @@ hosts=(
 	fa25-cs425-a910.cs.illinois.edu
 )
 
-for host in "${hosts[@]}"; do
-	echo "Switching $host to $MODE..."
-	ssh -i ~/.ssh/id_ed25520 cliu132@"$host" bash -s <<EOF
-pids=\$(lsof -t -i :5001)
+PORT=5003
 
+echo "Cleaning up nodes on port: $PORT"
+
+for host in "${hosts[@]}"; do
+	echo "Checking $host..."
+	ssh -i ~/.ssh/id_ed25520 cliu132@"$host" bash -s <<EOF
+PORT=$PORT
+pids=\$(lsof -t -i :\$PORT)
 if [ -n "\$pids" ]; then
-  kill -$SIGNAL \$pids
-  echo " -> Sent SIG$SIGNAL to PID(s): \$pids"
+    echo "Killing processes on port \$PORT: \$pids"
+    kill -9 \$pids
 else
-  echo " -> No process found on port 5001"
+    echo "No process using port \$PORT"
 fi
 EOF
-
 done
+
+echo "Cleanup complete."
