@@ -24,7 +24,7 @@ for host in "${hosts[@]:1:4}"; do
 	ssh -i ~/.ssh/id_ed25520 cliu132@$host bash -s <<EOF
 cd ~/mp2
 mkdir -p ~/mp2/logs
-nohup go run . --ip=$host --introducer=$introducer:5003 --drop-rate=0 > $LOGFILE 2>&1 &
+nohup go run . --ip=$host --introducer=$introducer:5003 --dropRate=0 > $LOGFILE 2>&1 &
 EOF
 
 done
@@ -41,7 +41,7 @@ for host in "${hosts[@]:5}"; do
 	ssh -i ~/.ssh/id_ed25520 cliu132@$host bash -s <<EOF
 cd ~/mp2
 mkdir -p ~/mp2/logs
-nohup go run . --ip=$host --introducer=$introducer:5003 --drop-rate=0 > $LOGFILE 2>&1 &
+nohup go run . --ip=$host --introducer=$introducer:5003 --dropRate=0 > $LOGFILE 2>&1 &
 EOF
 
 done

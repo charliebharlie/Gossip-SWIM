@@ -14,6 +14,7 @@ hosts=(
 	fa25-cs425-a910.cs.illinois.edu
 )
 
+PORT=5003
 read -p "Enter introducer machine number (1-10): " INTRO_NUM
 index=$((INTRO_NUM - 1))
 introducer=${hosts[$index]}
@@ -24,12 +25,12 @@ for host in "${hosts[@]}"; do
 	echo "Starting node on $host..."
 
 	ssh -i ~/.ssh/id_ed25520 cliu132@"$host" bash -s <<EOF
-pids=\$(lsof -t -i :5003)
+pids=\$(lsof -t -i :$PORT)
 if [ -n "\$pids" ]; then
-  echo "Killing processes on port 5003: \$pids"
+  echo "Killing processes on port $PORT: \$pids"
   kill -9 \$pids
 else
-  echo "No process using port 5003"
+  echo "No process using port $PORT"
 fi
 
 cd ~/mp2
@@ -40,21 +41,21 @@ touch /home/cliu132/mp2/incarnation_$host.log
 
 if [ "$host" = "$introducer" ]; then
     echo "Starting introducer on $host"
-    nohup go run . --ip=$host --drop-rate=0 > \$LOGFILE 2>&1 &
+    nohup go run . --ip=$host --dropRate=15 > \$LOGFILE 2>&1 &
 else
     echo "Starting node on $host (introducer=$introducer)"
-    nohup go run . --ip=$host --introducer=$introducer:5003 --drop-rate=0  > \$LOGFILE 2>&1 &
+    nohup go run . --ip=$host --introducer=$introducer:$PORT --dropRate=15  > \$LOGFILE 2>&1 &
 fi
 EOF
 done
 
-# echo "Waiting 10 seconds..."
-# sleep 60
-#
-# # Clean up the nodes
-# for host in "${hosts[@]}"; do
-# 	echo "Stopping node on $host..."
-# 	ssh -i ~/.ssh/id_ed25520 cliu132@"$host" "pids=\$(lsof -t -i :5003); [ -n \"\$pids\" ] && kill -SIGINT \$pids"
-# done
-#
-# echo "Killed all processes on nodes, check ~/mp2/logs for the log of the vm's run"
+echo "Waiting 15 seconds..."
+sleep 15
+
+# Clean up the nodes
+for host in "${hosts[@]}"; do
+	echo "Stopping node on $host..."
+	ssh -i ~/.ssh/id_ed25520 cliu132@"$host" "pids=\$(lsof -t -i :$PORT); [ -n \"\$pids\" ] && kill -SIGINT \$pids"
+done
+
+echo "Killed all processes on nodes, check ~/mp2/logs for the log of the vm's run"
